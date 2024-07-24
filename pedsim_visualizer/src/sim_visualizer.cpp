@@ -117,7 +117,7 @@ void SimVisualizer::publishAgentVisuals() {
 
   for (const auto& agent_state : current_states->agent_states) {
 
-    if (agent_state.type == 2) continue;
+    // if (agent_state.type == 2) continue;
 
     force_marker.ns = "agent_state_" + std::to_string(agent_state.id);
     force_marker.points.clear();
@@ -226,9 +226,9 @@ void SimVisualizer::publishObstacleVisuals() {
   walls_marker.color.r = 0.647059;
   walls_marker.color.g = 0.164706;
   walls_marker.color.b = 0.164706;
-  walls_marker.scale.x = 1.0;
-  walls_marker.scale.y = 1.0;
-  walls_marker.scale.z = 2.0;
+  walls_marker.scale.x = 0.1;
+  walls_marker.scale.y = 0.1;
+  walls_marker.scale.z = 0.32;
   walls_marker.pose.position.z = walls_marker.scale.z / 2.0;
   walls_marker.pose.orientation.w = 1.0;
   walls_marker.type = visualization_msgs::Marker::CUBE_LIST;
@@ -335,6 +335,7 @@ void SimVisualizer::setupPublishersAndSubscribers() {
     nh_.advertise<visualization_msgs::MarkerArray>("waypoints", 1);
 
   // TODO - get simulator node name by param.
+  
   sub_states_ = nh_.subscribe("/pedsim_simulator/simulated_agents", 1,
                               &SimVisualizer::agentStatesCallBack, this);
   sub_obstacles_ = nh_.subscribe("/pedsim_simulator/simulated_walls", 1,

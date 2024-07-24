@@ -15,7 +15,13 @@ set(PEDSIM_SIMULATOR_DEPENDENCIES
   tf
   cmake_modules
   dynamic_reconfigure
+  flatland_msgs
+  roslib
 )
+
+# Declaration of package required
+find_package(PkgConfig)
+pkg_check_modules(YAMLCPP REQUIRED yaml-cpp)
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
@@ -48,6 +54,8 @@ set(SOURCES
   	src/agentstatemachine.cpp
   	src/scenarioreader.cpp
 	src/rng.cpp
+	src/scene_services.cpp
+	src/agent_pose_stamped.cpp
 
 	# elements
 	src/element/agent.cpp
@@ -70,7 +78,6 @@ set(SOURCES
 	src/force/randomforce.cpp
 
 	# waypointplanner
-	src/waypointplanner/waypointplanner.cpp
 	src/waypointplanner/individualwaypointplanner.cpp
 	src/waypointplanner/queueingplanner.cpp
 	src/waypointplanner/shoppingplanner.cpp
@@ -82,6 +89,8 @@ set(MOC_FILES
 	include/pedsim_simulator/config.h
 	include/pedsim_simulator/scene.h
 	include/pedsim_simulator/agentstatemachine.h
+	include/pedsim_simulator/scene_services.h
+	include/pedsim_simulator/agent_pose_stamped.h
 
 	include/pedsim_simulator/element/scenarioelement.h
 	include/pedsim_simulator/element/agent.h
@@ -113,8 +122,12 @@ set(EXECUTABLE_NAME ${PROJECT_NAME})
 add_executable(${EXECUTABLE_NAME} ${SOURCES} ${MOC_SRCS_UI})
 add_dependencies(${EXECUTABLE_NAME} ${catkin_EXPORTED_TARGETS})
 add_dependencies(${EXECUTABLE_NAME} ${PROJECT_NAME}_gencfg)
-target_link_libraries(${EXECUTABLE_NAME}
-  ${Qt5Widgets_LIBRARIES} ${BOOST_LIBRARIES} ${catkin_LIBRARIES}
+target_link_libraries(
+  ${EXECUTABLE_NAME}
+  ${Qt5Widgets_LIBRARIES}
+  ${BOOST_LIBRARIES}
+  ${catkin_LIBRARIES}
+  ${YAMLCPP_LIBRARIES}
 )
 
 add_executable(simulate_diff_drive_robot src/simulate_diff_drive_robot.cpp)

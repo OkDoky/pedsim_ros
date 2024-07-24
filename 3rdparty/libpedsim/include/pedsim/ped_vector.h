@@ -12,7 +12,9 @@
 #define LIBEXPORT
 #endif
 
+#include <stdio.h>
 #include <cmath>
+#include <string>
 #include "ped_angle.h"
 
 namespace Ped {
@@ -40,6 +42,10 @@ class LIBEXPORT Tvector {
   Tvector normalized() const;
   void scale(double factor);
   Tvector scaled(double factor) const;
+  Ped::Tvector rotated(double angle) const;
+  void rotate(Tangle angle);
+  std::string toString() const;
+  int getQuadrant();
 
   Tvector leftNormalVector() const;
   Tvector rightNormalVector() const;

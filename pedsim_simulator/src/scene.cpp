@@ -54,6 +54,11 @@ Scene* Scene::Scene::instance = nullptr;
 Scene::Scene(QObject* parent) {
   // initialize values
   sceneTime = 0;
+  episode = 0;
+  guideActive = false;
+  followerActive = false;
+  robot = nullptr;
+  serviceRobotExists = false;
 
   // TODO: create this dynamically according to scenario
   QRect area(-500, -500, 1000, 1000);
@@ -63,6 +68,9 @@ Scene::Scene(QObject* parent) {
       new Ped::Ttree(this, 0, area.x(), area.y(), area.width(), area.height());
 
   obstacle_cells_.clear();
+
+  arenaGoalSub = nh_.subscribe(ros::this_node::getNamespace() + "/goal", 1, &Scene::arenaGoalCallback, this);
+  arenaGoal = nullptr;
 }
 
 Scene::~Scene() {
@@ -175,6 +183,15 @@ QRectF Scene::itemsBoundingRect() const {
 
 const QList<Agent*>& Scene::getAgents() const { return agents; }
 
+Agent* Scene::getAgent(int id) const {
+  for (Agent* agent : agents) {
+    if (agent->getId() == id) {
+      return agent;
+    }
+  }
+  return nullptr;
+}
+
 QList<AgentGroup*> Scene::getGroups() { return agentGroups; }
 
 QMap<QString, AttractionArea*> Scene::getAttractions() { return attractions; }
@@ -258,6 +275,7 @@ void Scene::dissolveClusters() {
       if (currentGroup->memberCount() == 1) {
         // we don't need one agent groups
         delete currentGroup;
+        continue;
       } else if (currentGroup->memberCount() > 1) {
         // keep track of groups
         agentGroups.append(currentGroup);
@@ -311,11 +329,16 @@ void Scene::addAgent(Agent* agent) {
   AlongWallForce* alongWallForce = new AlongWallForce(agent);
   agent->addForce(alongWallForce);
 
+  if (agent->getType() == Ped::Tagent::AgentType::SERVICEROBOT) {
+    serviceRobotExists = true;
+  }
+
   // inform users
   emit agentAdded(agent->getId());
 }
 
 void Scene::addObstacle(Obstacle* obstacle) {
+  ROS_INFO("added wall from (%f, %f) to (%f, %f)", obstacle->getax(), obstacle->getay(), obstacle->getbx(), obstacle->getby());
   // keep track of the obstacle
   obstacles.append(obstacle);
 
@@ -330,7 +353,7 @@ void Scene::addWaypoint(Waypoint* waypoint) {
   // keep track of the waypoints
   waypoints.insert(waypoint->getName(), waypoint);
 
-  // add the obstacle to the PedSim scene
+  // add the waypoint to the PedSim scene
   Ped::Tscene::addWaypoint(waypoint);
 
   // inform users
@@ -377,6 +400,14 @@ bool Scene::removeAgent(Agent* agent) {
   // don't keep track of agent anymore
   agents.removeAll(agent);
 
+  // update serviceRobotExists status
+  serviceRobotExists = false;
+  for (auto a : agents) {
+    if (a->getType() == Ped::Tagent::AgentType::SERVICEROBOT) {
+      serviceRobotExists = true;
+    }
+  }
+
   // remove agent from all groups
   QList<AgentGroup*> groupsToRemove;
   foreach (AgentGroup* currentGroup, agentGroups) {
@@ -410,6 +441,14 @@ bool Scene::removeObstacle(Obstacle* obstacle) {
 
   // actually remove it
   return Ped::Tscene::removeObstacle(obstacle);
+}
+
+bool Scene::removeWaypoint(QString name) {
+  auto waypoint = getWaypointByName(name);
+  if (waypoint != nullptr) {
+    return removeWaypoint(waypoint);
+  }
+  return false;
 }
 
 bool Scene::removeWaypoint(Waypoint* waypoint) {
@@ -567,4 +606,91 @@ void Scene::moveAllAgents() {
   emit movedAgents();
 }
 
+// move the agent cluster to another position directly
+// @param int i episode number to determine the next wp
+void Scene::moveClusters(int i) {
+  guideActive = false;
+  followerActive = false;
+  for(Agent* agent: agents){
+    // skip robot
+    if (agent->getType() == Ped::Tagent::ROBOT) {
+      continue;
+    }
+    
+    int k = (int)agent->getWaypoints().size();
+    Waypoint *w=agent->getWaypoints()[i%k];
+    agent->setPosition(w->getx(), w->gety());
+
+    // reset states
+    if (
+      agent->getType() == Ped::Tagent::ADULT ||
+      agent->getType() == Ped::Tagent::ELDER ||
+      agent->getType() == Ped::Tagent::CHILD
+    ) {
+      agent->getStateMachine()->activateState(AgentStateMachine::AgentState::StateWalking);
+    } else if (
+      agent->getType() == Ped::Tagent::VEHICLE ||
+      agent->getType() == Ped::Tagent::SERVICEROBOT
+    ) {
+      agent->getStateMachine()->activateState(AgentStateMachine::AgentState::StateDriving);
+    }
+
+    agent->hasRequestedFollower = false;
+  }
+}
+
+void Scene::removeAllObstacles(){
+  // remove all elements from the scene
+  Ped::Tscene::removeAllObstacles();
+  obstacles.clear();
+}
+
 void Scene::cleanupScene() { Ped::Tscene::cleanup(); }
+
+bool Scene::getClosestObstacle(Ped::Tvector pos_in, Ped::Twaypoint* closest) {
+  double min_dist_squared = INFINITY;
+  bool found_something = false;
+  for (auto wp : circleObstacles) {
+    auto diff = pos_in - wp.getPosition();
+    auto dist_squared = diff.lengthSquared();
+    if (dist_squared < min_dist_squared) {
+      min_dist_squared = dist_squared;
+      *closest = wp;
+      found_something = true;
+    }
+  }
+
+  return found_something;
+}
+
+void Scene::arenaGoalCallback(const geometry_msgs::PoseStampedConstPtr& msg) {
+  if (arenaGoal == nullptr) {
+    arenaGoal = new Ped::Tvector();
+  }
+  arenaGoal->x = msg->pose.position.x;
+  arenaGoal->y = msg->pose.position.y;
+}
+
+std::vector<int> Scene::odomPosToMapIndex(Ped::Tvector pos) {
+  // translate a position in the "odom" frame to a map index
+  int index_y = static_cast<int> ((pos.y - map_.info.origin.position.y) / map_.info.resolution);
+  int index_x = static_cast<int> ((pos.x - map_.info.origin.position.x) / map_.info.resolution);
+  std::vector<int> v{index_y, index_x};
+  return v;
+}
+
+bool Scene::isOccupied(Ped::Tvector pos) {
+  std::vector<int> index = odomPosToMapIndex(pos);
+  // check if indexes are within range
+  if (
+    0 <= index[0] &&
+    index[0] < (int) map_.info.height &&
+    0 <= index[1] &&
+    index[1] < (int) map_.info.width)
+  {
+    // translate 2d index to 1d index in row-major order
+    return map_.data[index[0] * map_.info.width + index[1]] > 0;
+  }
+
+  return true;
+}

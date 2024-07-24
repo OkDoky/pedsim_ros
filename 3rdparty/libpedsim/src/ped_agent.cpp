@@ -1,12 +1,14 @@
 //
 // pedsim - A microscopic pedestrian simulation system.
 // Copyright (c) 2003 - 20012 by Christian Gloor
+// Modified by Ronja Gueldenring
 //
 
 #include "ped_agent.h"
 #include "ped_obstacle.h"
 #include "ped_scene.h"
 #include "ped_waypoint.h"
+#include <ros/ros.h>
 
 #include <algorithm>
 #include <cmath>
@@ -14,11 +16,11 @@
 
 using namespace std;
 
+int Ped::Tagent::staticid = 1;
 default_random_engine generator;
 
 /// Default Constructor
 Ped::Tagent::Tagent() {
-  static int staticid = 0;
   id = staticid++;
   p.x = 0;
   p.y = 0;
@@ -31,17 +33,27 @@ Ped::Tagent::Tagent() {
   teleop = false;
 
   // assign random maximal speed in m/s
-  normal_distribution<double> distribution(1.34, 0.26);
+  normal_distribution<double> distribution(0.6, 0.2);
   vmax = distribution(generator);
-
+  vmaxDefault = vmax;
   forceFactorDesired = 1.0;
   forceFactorSocial = 2.1;
   forceFactorObstacle = 10.0;
   forceSigmaObstacle = 0.8;
+  forceSigmaRobot = 0.3*vmax/0.4;
 
   agentRadius = 0.35;
   relaxationTime = 0.5;
   robotPosDiffScalingFactor = 5;
+  obstacleForceRange = 2.0;
+
+  keepDistanceForceDistanceDefault = 0.8;
+  keepDistanceForceDistance = keepDistanceForceDistanceDefault;
+  keepDistanceTo = Tvector(0.0, 0.0);
+
+  obstacleforce = Ped::Tvector(0.0, 0.0);
+  
+  ROS_INFO("created agent with id: %d", id);
 }
 
 /// Destructor
@@ -104,6 +116,19 @@ void Ped::Tagent::setForceFactorSocial(double f) { forceFactorSocial = f; }
 /// \param   f The factor
 void Ped::Tagent::setForceFactorObstacle(double f) { forceFactorObstacle = f; }
 
+double Ped::Tagent::keepDistanceForceFunction(double distance) {
+  return -10 * (distance - keepDistanceForceDistance);
+}
+
+// force to keep a specific distance
+Ped::Tvector Ped::Tagent::keepDistanceForce() {
+  Tvector diff = p - keepDistanceTo;
+  Tvector direction = diff.normalized();
+  double magnitude = keepDistanceForceFunction(diff.length());
+  Tvector force = direction * magnitude;
+  return force;
+}
+
 /// Calculates the force between this agent and the next assigned waypoint.
 /// If the waypoint has been reached, the next waypoint in the list will be
 /// selected.
@@ -113,7 +138,7 @@ Ped::Tvector Ped::Tagent::desiredForce() {
   Twaypoint* waypoint = getCurrentWaypoint();
 
   // if there is no destination, don't move
-  if (waypoint == NULL) {
+  if (waypoint == nullptr) {
     desiredDirection = Ped::Tvector();
     Tvector antiMove = -v / relaxationTime;
     return antiMove;
@@ -150,7 +175,7 @@ Ped::Tvector Ped::Tagent::socialForce() const {
   // (set according to Moussaid-Helbing 2009)
   const double n_prime = 3;
 
-  Tvector force;
+  Tvector force(0.0, 0.0);
   for (const Ped::Tagent* other : neighbors) {
     // don't compute social force to yourself
     if (other->id == id) continue;
@@ -158,9 +183,24 @@ Ped::Tvector Ped::Tagent::socialForce() const {
     // compute difference between both agents' positions
     Tvector diff = other->p - p;
 
+    // if both agents have the exact same position disable social force to avoid division by zero
+    if (diff.lengthSquared() <= 0.001) {
+      return Tvector(0.0, 0.0);
+    }
+
     if(other->getType() == ROBOT) diff /= robotPosDiffScalingFactor;
 
     Tvector diffDirection = diff.normalized();
+    int quadrant_before = diff.getQuadrant();
+    // shorten the diff vector by the model radiuses
+    diff -= diffDirection * agentRadius;
+    diff -= diffDirection * other->agentRadius;
+    int quadrant_after = diff.getQuadrant();
+    if (quadrant_before != quadrant_after) {
+      // vector has changed direction i.e. models are already overlapping
+      // make diff length close to zero
+      diff = diffDirection * 0.01;
+    }
 
     // compute difference between both agents' velocity vectors
     // Note: the agent-other-order changed here
@@ -169,37 +209,74 @@ Ped::Tvector Ped::Tagent::socialForce() const {
     // compute interaction direction t_ij
     Tvector interactionVector = lambdaImportance * velDiff + diffDirection;
     double interactionLength = interactionVector.length();
+    assert(interactionLength > 0.0);
     Tvector interactionDirection = interactionVector / interactionLength;
 
-    // compute angle theta (between interaction and position difference vector)
-    Ped::Tangle theta = interactionDirection.angleTo(diffDirection);
 
-    // compute model parameter B = gamma * ||D||
-    double B = gamma * interactionLength;
+    // The robots influence is computed separetly in Ped::Tagent::robotForce()
+    if(other->getType() == ROBOT){
+      continue;
+    }else{
+      // compute angle theta (between interaction and position difference vector)
+      Ped::Tangle theta = interactionDirection.angleTo(diffDirection);
+      // compute model parameter B = gamma * ||D||
+      double B = gamma * interactionLength;
 
-    double thetaRad = theta.toRadian();
-    double forceVelocityAmount =
-        -exp(-diff.length() / B -
-             (n_prime * B * thetaRad) * (n_prime * B * thetaRad));
-    double forceAngleAmount =
-        -theta.sign() *
-        exp(-diff.length() / B - (n * B * thetaRad) * (n * B * thetaRad));
+      double thetaRad = theta.toRadian();
+      double forceVelocityAmount =
+          -exp(-diff.length() / B -
+              (n_prime * B * thetaRad) * (n_prime * B * thetaRad));
+      double forceAngleAmount =
+          -theta.sign() *
+          exp(-diff.length() / B - (n * B * thetaRad) * (n * B * thetaRad));
 
-    Tvector forceVelocity = forceVelocityAmount * interactionDirection;
-    Tvector forceAngle =
-        forceAngleAmount * interactionDirection.leftNormalVector();
+      Tvector forceVelocity = forceVelocityAmount * interactionDirection;
+      Tvector forceAngle =
+          forceAngleAmount * interactionDirection.leftNormalVector();
+      force += forceVelocity + forceAngle;
 
-    force += forceVelocity + forceAngle;
+    }
+
   }
 
   return force;
 }
 
+Ped::Tvector Ped::Tagent::robotForce(){
+  Tvector force;
+  return force;
+}
+
+// // Added by Ronja Gueldenring
+// // Robot influences agents behaviour according the robot force
+// Ped::Tvector Ped::Tagent::robotForce(){
+//   double vel = sqrt(pow(this->getvx(),2) + pow(this->getvy(),2));
+//   if (vel > 0.1){
+//     still_time = 0.0;
+//   }
+
+//   Tvector force;
+//   for (const Ped::Tagent* other : neighbors) {
+//     if(other->getType() == ROBOT){
+//       // pedestrian is influenced robot force depending on the distance to the robot.
+//       Tvector diff = other->p - p;
+//       Tvector diffDirection = diff.normalized();
+//       double distanceSquared = diff.lengthSquared();
+//       double distance = sqrt(distanceSquared) - (agentRadius + 0.7);
+//       double forceAmount = -1.0 * exp(-distance / forceSigmaRobot);
+//       Tvector robot_force = forceAmount * diff.normalized();
+//       force += robot_force;
+//       break;
+//     }
+//   }
+//   return force;
+// }
+
 /// Calculates the force between this agent and the nearest obstacle in this
 /// scene.
 /// Iterates over all obstacles == O(N).
 /// \return  Tvector: the calculated force
-Ped::Tvector Ped::Tagent::obstacleForce() const {
+Ped::Tvector Ped::Tagent::obstacleForce() {
   // obstacle which is closest only
   Ped::Tvector minDiff;
   double minDistanceSquared = INFINITY;
@@ -217,7 +294,11 @@ Ped::Tvector Ped::Tagent::obstacleForce() const {
   }
 
   double distance = sqrt(minDistanceSquared) - agentRadius;
-  double forceAmount = exp(-distance / forceSigmaObstacle);
+  // double forceAmount = exp(-distance / forceSigmaObstacle);
+  double forceAmount = 10.0;
+  if (distance > 0.0) {
+    forceAmount = 1.0 / distance;
+  }
   return forceAmount * minDiff.normalized();
 }
 
@@ -228,20 +309,22 @@ Ped::Tvector Ped::Tagent::obstacleForce() const {
 /// \return  Tvector: the calculated force
 /// \param   e is a vector defining the direction in which the agent wants to
 /// walk to.
-Ped::Tvector Ped::Tagent::myForce(Ped::Tvector e) const {
-  return Ped::Tvector();
+Ped::Tvector Ped::Tagent::myForce(Ped::Tvector e) {
+  return Ped::Tvector(0.0, 0.0);
 }
 
 void Ped::Tagent::computeForces() {
-  // update neighbors
+  // update neighbors 
   // NOTE - have a config value for the neighbor range
   const double neighborhoodRange = 10.0;
-  neighbors = scene->getNeighbors(p.x, p.y, neighborhoodRange);
+  neighbors = scene->getNeighbors(p.x, p.y, neighborhoodRange);  
 
   // update forces
   desiredforce = desiredForce();
   if (forceFactorSocial > 0) socialforce = socialForce();
   if (forceFactorObstacle > 0) obstacleforce = obstacleForce();
+  robotforce = robotForce();
+  keepdistanceforce = keepDistanceForce();
   myforce = myForce(desiredDirection);
 }
 
@@ -253,13 +336,34 @@ void Ped::Tagent::computeForces() {
 /// \param   stepSizeIn This tells the simulation how far the agent should
 /// proceed
 void Ped::Tagent::move(double stepSizeIn) {
-  // sum of all forces --> acceleration
-  a = forceFactorDesired * desiredforce + forceFactorSocial * socialforce +
-      forceFactorObstacle * obstacleforce + myforce;
+  still_time += stepSizeIn;
 
+  // sum of all forces --> acceleration
+  a = forceFactorDesired * desiredforce +
+      forceFactorSocial * socialforce +
+      forceFactorObstacle * obstacleforce +
+      myforce +
+      keepdistanceforce +
+      forceFactorRobot * robotforce;
+    // if (id == 1) {
+    //   ROS_INFO("desiredforce: %lf, %lf, %lf", desiredforce.x, desiredforce.y, desiredforce.z);
+    //   ROS_INFO("socialforce: %lf, %lf, %lf", socialforce.x, socialforce.y, socialforce.z);
+    //   ROS_INFO("obstacleforce: %lf, %lf, %lf", obstacleforce.x, obstacleforce.y, obstacleforce.z);
+    //   ROS_INFO("myforce: %lf, %lf, %lf", myforce.x, myforce.y, myforce.z);
+    //   ROS_INFO("keepdistanceforce: %lf, %lf, %lf", keepdistanceforce.x, keepdistanceforce.y, keepdistanceforce.z);
+    // }
+    // ROS_INFO("stepSizeln%lf",stepSizeIn);
+
+  // Added by Ronja Gueldenring
+  // add robot force, so that pedestrians avoid robot
+  // if (this->getType() == ADULT_AVOID_ROBOT || this->getType() == ADULT_AVOID_ROBOT_REACTION_TIME){
+      // a = a + forceFactorSocial * robotforce;
+  // }
+  
   // calculate the new velocity
   if (getTeleop() == false) {
     v = v + stepSizeIn * a;
+    // ROS_WARN("update velocity %lf,%lf", v.x,v.y);
   }
 
   // don't exceed maximal speed

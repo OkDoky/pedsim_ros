@@ -55,6 +55,7 @@
 #include <nav_msgs/Odometry.h>
 #include <std_msgs/Header.h>
 #include <std_srvs/Empty.h>
+#include <rosgraph_msgs/Clock.h>
 
 #include <pedsim_simulator/agentstatemachine.h>
 #include <pedsim_simulator/config.h>
@@ -89,11 +90,13 @@ class Simulator {
                            std_srvs::Empty::Response& response);
 
   void spawnCallback(const ros::TimerEvent& event);
+  void odomCallback(const nav_msgs::OdometryConstPtr &odom);
+  void timerCallback(const rosgraph_msgs::Clock& clock);
 
  protected:
   void reconfigureCB(SimConfig& config, uint32_t level);
   dynamic_reconfigure::Server<SimConfig> server_;
-
+  
  private:
   void updateRobotPositionFromTF();
   void publishAgents();
@@ -104,7 +107,7 @@ class Simulator {
 
  private:
   ros::NodeHandle nh_;
-  bool paused_;
+  bool paused_, timer_tic_;
   ros::Timer spawn_timer_;
 
   // publishers
@@ -113,6 +116,9 @@ class Simulator {
   ros::Publisher pub_agent_groups_;
   ros::Publisher pub_robot_position_;
   ros::Publisher pub_waypoints_;
+
+  // subscribers
+  ros::Subscriber sub_clock_;
 
   // provided services
   ros::ServiceServer srv_pause_simulation_;
@@ -127,6 +133,7 @@ class Simulator {
   Agent* robot_;
   tf::StampedTransform last_robot_pose_;
   geometry_msgs::Quaternion last_robot_orientation_;
+  ros::Subscriber odom_sub_;
 
   inline std::string agentStateToActivity(
       const AgentStateMachine::AgentState& state) const;

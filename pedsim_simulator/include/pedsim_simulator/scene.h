@@ -39,6 +39,9 @@
 #include <QRectF>
 
 #include <pedsim_simulator/utilities.h>
+#include <geometry_msgs/Point.h>
+#include <geometry_msgs/PoseStamped.h>
+#include <ros/ros.h>
 
 // Forward Declarations
 class QGraphicsScene;
@@ -72,9 +75,11 @@ class Scene : public QObject, protected Ped::Tscene {
 #define SCENE Scene::getInstance()
  protected:
   static Scene* instance;
+  ros::NodeHandle nh_;
 
  public:
   static Scene& getInstance();
+  void setTimeStepSize(float t);
 
   // Signals
  signals:
@@ -111,6 +116,7 @@ class Scene : public QObject, protected Ped::Tscene {
 
   // → elements
   const QList<Agent*>& getAgents() const;
+  Agent* getAgent(int id) const;
   Agent* getAgentById(int idIn) const;
   QList<AgentGroup*> getGroups();
   QMap<QString, AttractionArea*> getAttractions();
@@ -143,16 +149,42 @@ class Scene : public QObject, protected Ped::Tscene {
   virtual void addAttraction(AttractionArea* attractionIn);
   virtual bool removeAgent(Agent* agent);
   virtual bool removeObstacle(Obstacle* obstacle);
+  bool removeWaypoint(QString name);
   virtual bool removeWaypoint(Waypoint* waypoint);
   virtual bool removeAgentCluster(AgentCluster* clusterIn);
   virtual bool removeWaitingQueue(WaitingQueue* queueIn);
   virtual bool removeAttraction(AttractionArea* attractionInIn);
 
+  //->move agent cluster directly to another place
+  virtual void moveClusters(int i);
+  virtual void removeAllObstacles();
+
   virtual std::set<const Ped::Tagent*> getNeighbors(double x, double y,
                                                     double maxDist);
 
+  bool getClosestObstacle(Ped::Tvector pos_in, Ped::Twaypoint* closest);
+  void arenaGoalCallback(const geometry_msgs::PoseStampedConstPtr& msg);
+  std::vector<int> odomPosToMapIndex(Ped::Tvector pos);
+  bool isOccupied(Ped::Tvector pos);
+
   // obstacle cell locations
   std::vector<Location> obstacle_cells_;
+
+  std::vector<std::string> agent_types {"adult", "child", "elder", "forklift", "servicerobot", "robot"};
+  std::vector<float> agent_radius {0.5, 0.5, 0.5, 1.8, 1.0, 1.0};  // used for obstacle force calculation
+  std::vector<std::string> obstacle_types {"areawaypoint", "pointwaypoint", "shelf"};
+  std::vector<float> obstacle_radius {1.0, 1.0, 1.0};  // used for obstacle force calculation
+  std::vector<Ped::Twaypoint> circleObstacles;
+  std::vector<std::string> start_up_modes {"default", "wait_timer", "trigger_zone"};
+
+  Agent* robot;
+  int episode;
+  bool guideActive;
+  bool followerActive;
+  bool serviceRobotExists;
+
+  Ped::Tvector* arenaGoal;
+  ros::Subscriber arenaGoalSub;
 
   // Attributes
  protected:
